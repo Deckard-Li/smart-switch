@@ -58,7 +58,10 @@ void loadConfig() {
   EEPROM.begin(sizeof(StoredConfig));
   StoredConfig cfg;
   EEPROM.get(0, cfg);
-  if (calcChecksum(cfg) == cfg.checksum) {
+
+  // A completely erased flash is filled with 0xFF. By coincidence, the XOR checksum
+  // of 171 0xFF bytes is also 0xFF, so we must explicitly reject a wiped EEPROM.
+  if (calcChecksum(cfg) == cfg.checksum && cfg.wifiSsid[0] != '\xFF') {
     strncpy(netSsid,       cfg.wifiSsid,     sizeof(netSsid)       - 1);
     strncpy(netPassword,   cfg.wifiPassword, sizeof(netPassword)   - 1);
     strncpy(netMqttServer, cfg.mqttServer,   sizeof(netMqttServer) - 1);
