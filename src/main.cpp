@@ -190,14 +190,14 @@ void startConfigPortal() {
       "<form method='POST' action='/save'>"
       "<label>WiFi SSID</label>"
       "<input name='ssid' value='"));
-    webServer.sendContent(netSsid);
+    if (netSsid[0]) webServer.sendContent(netSsid);
 
     webServer.sendContent_P(PSTR(
       "'><label>WiFi Password</label>"
       "<input name='pass' type='password' placeholder='leave blank to keep current'>"
       "<label>MQTT Server</label>"
       "<input name='mqtt' placeholder='192.168.1.x' value='"));
-    webServer.sendContent(netMqttServer);
+    if (netMqttServer[0]) webServer.sendContent(netMqttServer);
 
     char portBuf[6];
     snprintf(portBuf, sizeof(portBuf), "%u", netMqttPort);
@@ -208,6 +208,7 @@ void startConfigPortal() {
     webServer.sendContent_P(PSTR(
       "'><button type='submit'>Save &amp; Restart</button>"
       "</form></body></html>"));
+    webServer.sendContent(""); // Send empty chunk to terminate the response
   });
 
   // ── POST /save – persist credentials and reboot ─────────────────────────────
