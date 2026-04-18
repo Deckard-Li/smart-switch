@@ -6,7 +6,7 @@ An ESP-01S based smart relay controller designed for speakers, integrating WiFi 
 
 - **Captive Portal Configuration**: On first boot or when WiFi fails, the device acts as a WiFi Access Point (`SmartSwitch-Setup`). You can configure the WiFi credentials and MQTT server settings via a web browser at `192.168.4.1`.
 - **MQTT Control**: Send commands to turn the relay on/off and enable/disable the presence scanning feature.
-- **Ping-based Presence Detection**: Continuously monitors the local network for a specific device's IP address. If the device connects to the network and responds to ping (e.g., your smartphone or TV), the smart switch automatically turns on the relay. If the device disconnects or shuts down, the relay turns off. This method is highly reliable and avoids issues with devices that keep their network cards powered on (Wake-on-LAN) even when shut down.
+- **MAC-to-IP Ping Presence Detection**: The switch tracks a specific device's MAC address. It periodically broadcasts ARP requests to discover the device's current IP address, and then uses a highly reliable ICMP ping to check if the device is active. If the device responds to the ping (e.g., your smartphone or TV is turned on), the smart switch automatically turns on the relay. If the ping fails (e.g., the device is shut down or goes offline), the relay turns off. This hybrid method gives you the reliability of pinging (bypassing Wake-on-LAN false positives) without requiring you to configure static IP addresses on your router!
 - **EEPROM Persistence**: All settings (WiFi, MQTT server, target MAC address, and device state) are safely stored in flash memory, meaning they survive power cycles.
 - **Compact Hardware**: Built for the ESP-01S and standard 5V/3.3V relay modules, utilizing GPIO0 for the relay control.
 
@@ -23,7 +23,7 @@ This project uses [PlatformIO](https://platformio.org/).
 1. Clone this repository.
 2. Open the project in VSCode with the PlatformIO extension installed.
 3. Build and upload the firmware to your ESP-01S.
-   *(Note: The device polls the target IP address every 30 seconds to ensure the relay turns off promptly after the target device goes offline).*
+   *(Note: The device polls the target MAC/IP address every 30 seconds to ensure the relay turns off promptly after the target device goes offline).*
 
 ## Initial Setup
 
@@ -51,15 +51,17 @@ The device listens and publishes to the following topics (defaults configured in
 - **State Topic**: `home/smart-switch/scan/state`
   - Publishes `ON` or `OFF`.
 
-### Target IP Address Configuration
-- **Command Topic**: `home/smart-switch/ip/command`
-  - Send the static IP address of the device you want to track (e.g., `192.168.1.100`).
-- **State Topic**: `home/smart-switch/ip/state`
-  - Publishes the currently tracked IP address.
+### Target MAC Address Configuration
+- **Command Topic**: `home/smart-switch/mac/command`
+  - Send the MAC address of the device you want to track (e.g., `AA:BB:CC:DD:EE:FF`).
+- **State Topic**: `home/smart-switch/mac/state`
+  - Publishes the currently tracked MAC address.
 
 ## How the Scanner Works
 
-When `relay/command` is set to `ON` and the scan is enabled, the device sends a single ICMP echo request (ping) to the target IP address every 30 seconds. If the device responds, the relay turns ON. If the ping times out or fails (e.g., the device is shut down or goes offline), the relay turns OFF. This method avoids the need to disconnect from WiFi, keeping the MQTT connection completely stable, and is immune to devices keeping their network cards active for Wake-on-LAN purposes.
+When `relay/command` is set to `ON` and the scan is enabled, the device first sends lightweight ARP requests across your `/24` subnet. It then checks the lwIP ARP cache to discover the current IP address of your target MAC.
+Once the IP is known, it sends a single ICMP echo request (ping) to that IP every 30 seconds. If the device responds, the relay turns ON. If the ping times out or fails (e.g., the device is shut down or goes offline), the relay turns OFF and the IP is discarded (so the next cycle will start an ARP sweep again to find the new IP if it reconnects).
+This hybrid method gives you the reliability of Ping without needing to set static IP addresses on your router, and is immune to devices keeping their network cards active for Wake-on-LAN purposes.
 
 ## Resetting the Device
 

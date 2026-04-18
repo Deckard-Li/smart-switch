@@ -27,10 +27,10 @@
 #define TOPIC_SCAN_CMD    "home/smart-switch/scan/command"
 #define TOPIC_SCAN_STATE  "home/smart-switch/scan/state"
 
-//  Target IP address
-//    Publish an IP in "192.168.x.x" format to TOPIC_IP_CMD.
-#define TOPIC_IP_CMD      "home/smart-switch/ip/command"
-#define TOPIC_IP_STATE    "home/smart-switch/ip/state"
+//  Target MAC address
+//    Publish a MAC in "AA:BB:CC:DD:EE:FF" format to TOPIC_MAC_CMD.
+#define TOPIC_MAC_CMD     "home/smart-switch/mac/command"
+#define TOPIC_MAC_STATE   "home/smart-switch/mac/state"
 
 // ── Hardware ──────────────────────────────────────────────────────────────────
 // ESP-01/01S has GPIO0 and GPIO2 available.
@@ -40,7 +40,9 @@
                                   // false → LOW  level turns relay ON (common for opto-isolated boards)
 
 
-// ── IP presence scan (Ping-based) ────────────────────────────────────────────
-// The device stays connected to WiFi at all times.  On each cycle it pings
-// the target IP address.  No WiFi/MQTT reconnections are needed between cycles.
+// ── IP presence scan (MAC-to-IP Ping-based) ──────────────────────────────────
+// The device stays connected to WiFi at all times. On each cycle it checks if
+// the IP is known. If not, it sends ARP requests to find the IP of the MAC.
+// It then pings the resolved IP address.
 #define SCAN_INTERVAL_MS    30000UL  // how often to start a new ping cycle (ms)
+#define ARP_REPLY_TIMEOUT_MS  500UL  // how long to wait for ARP replies before reading the cache (ms)
