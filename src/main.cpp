@@ -4,10 +4,8 @@
 #include <DNSServer.h>
 #include <PubSubClient.h>
 #include <EEPROM.h>
+#include <ESP8266Ping.h>
 #include "config.h"
-
-#include <lwip/etharp.h>         // etharp_request(), etharp_get_entry()
-#include <lwip/netif.h>          // netif_default
 
 // ── EEPROM layout ─────────────────────────────────────────────────────────────
 struct StoredConfig {
@@ -15,9 +13,9 @@ struct StoredConfig {
   char     wifiPassword[64];
   char     mqttServer[64];
   uint16_t mqttPort;
-  uint8_t  mac[6];
+  uint32_t targetIp;
   bool     scanEnabled;
-  bool     macSet;
+  bool     ipSet;
   bool     masterOn;
   uint8_t  checksum;   // XOR checksum of all preceding bytes
 };
@@ -34,14 +32,12 @@ DNSServer        dnsServer;
 bool             portalActive = false;
 
 // ── Runtime state ─────────────────────────────────────────────────────────────
-uint8_t  targetMac[6]  = {0};
-bool     targetMacSet  = false;
-bool     scanEnabled   = false;
-bool     masterOn      = false;  // relay/command master switch
-bool     relayState    = false;
-bool          arpPending   = false;  // true while waiting for ARP replies
+IPAddress     targetIp(0, 0, 0, 0);
+bool          targetIpSet  = false;
+bool          scanEnabled  = false;
+bool          masterOn     = false;  // relay/command master switch
+bool          relayState   = false;
 unsigned long lastScanTime = 0;
-unsigned long arpSentTime  = 0;
 
 WiFiClient   wifiClient;
 PubSubClient mqttClient(wifiClient);
@@ -66,9 +62,9 @@ void loadConfig() {
     strncpy(netPassword,   cfg.wifiPassword, sizeof(netPassword)   - 1);
     strncpy(netMqttServer, cfg.mqttServer,   sizeof(netMqttServer) - 1);
     netMqttPort = cfg.mqttPort ? cfg.mqttPort : MQTT_PORT;
-    memcpy(targetMac, cfg.mac, 6);
+    targetIp     = cfg.targetIp;
     scanEnabled  = cfg.scanEnabled;
-    targetMacSet = cfg.macSet;
+    targetIpSet  = cfg.ipSet;
     masterOn     = cfg.masterOn;
     Serial.println("[EEPROM] Config restored");
     Serial.printf("[EEPROM] WiFi SSID:   %s\n", netSsid);
@@ -82,9 +78,9 @@ void saveConfig() {
   strncpy(cfg.wifiPassword, netPassword,   sizeof(cfg.wifiPassword) - 1);
   strncpy(cfg.mqttServer,   netMqttServer, sizeof(cfg.mqttServer)   - 1);
   cfg.mqttPort = netMqttPort;
-  memcpy(cfg.mac, targetMac, 6);
+  cfg.targetIp    = targetIp;
   cfg.scanEnabled = scanEnabled;
-  cfg.macSet      = targetMacSet;
+  cfg.ipSet       = targetIpSet;
   cfg.masterOn    = masterOn;
   cfg.checksum    = calcChecksum(cfg);
   EEPROM.put(0, cfg);
@@ -107,54 +103,9 @@ void setRelay(bool on) {
   publishRelayState();
 }
 
-// ── MAC helpers ───────────────────────────────────────────────────────────────
-// Accepts "AA:BB:CC:DD:EE:FF" (upper or lower case).
-bool parseMac(const char* str, uint8_t* mac) {
-  if (strlen(str) != 17) return false;
-  for (int i = 0; i < 6; i++) {
-    if (i < 5 && str[i * 3 + 2] != ':') return false;
-    char b[3] = {str[i * 3], str[i * 3 + 1], '\0'};
-    mac[i] = (uint8_t)strtol(b, nullptr, 16);
-  }
-  return true;
-}
-
-void publishMacState() {
-  char buf[18];
-  snprintf(buf, sizeof(buf), "%02X:%02X:%02X:%02X:%02X:%02X",
-    targetMac[0], targetMac[1], targetMac[2],
-    targetMac[3], targetMac[4], targetMac[5]);
-  mqttClient.publish(TOPIC_MAC_STATE, buf, true);
-}
-
-// ── ARP-based presence detection ─────────────────────────────────────────────
-// Send one ARP request per host address in the local /24 subnet.
-// lwIP processes the replies automatically while mqttClient.loop()/yield() run.
-void sendArpRequests() {
-  struct netif* iface = netif_default;
-  if (!iface) return;
-  IPAddress local = WiFi.localIP();
-  Serial.printf("[Scan] Sending ARP requests on %d.%d.%d.0/24\n",
-                local[0], local[1], local[2]);
-  for (int h = 1; h < 255; h++) {
-    ip4_addr_t target;
-    IP4_ADDR(&target, local[0], local[1], local[2], (uint8_t)h);
-    etharp_request(iface, &target);
-    delay(1);   // let lwIP breathe between requests
-  }
-}
-
-// Scan the lwIP ARP cache for the target MAC address.
-bool checkArpCache() {
-  for (size_t i = 0; i < ARP_TABLE_SIZE; i++) {
-    ip4_addr_t*      ip  = nullptr;
-    struct netif*    nif = nullptr;
-    struct eth_addr* mac = nullptr;
-    if (etharp_get_entry(i, &ip, &nif, &mac) && mac) {
-      if (memcmp(mac->addr, targetMac, 6) == 0) return true;
-    }
-  }
-  return false;
+// ── IP helpers ───────────────────────────────────────────────────────────────
+void publishIpState() {
+  mqttClient.publish(TOPIC_IP_STATE, targetIp.toString().c_str(), true);
 }
 
 // ── Config portal ─────────────────────────────────────────────────────────────
@@ -267,7 +218,7 @@ bool connectWiFi(unsigned long timeoutMs = 0) {
 void publishAllStates() {
   publishRelayState();
   mqttClient.publish(TOPIC_SCAN_STATE, scanEnabled ? "ON" : "OFF", true);
-  if (targetMacSet) publishMacState();
+  if (targetIpSet) publishIpState();
 }
 
 // Forward declaration so connectMQTT can register the callback before it is defined.
@@ -286,7 +237,7 @@ void connectMQTT() {
       Serial.println(" OK");
       mqttClient.subscribe(TOPIC_RELAY_CMD);
       mqttClient.subscribe(TOPIC_SCAN_CMD);
-      mqttClient.subscribe(TOPIC_MAC_CMD);
+      mqttClient.subscribe(TOPIC_IP_CMD);
       publishAllStates();
     } else {
       Serial.printf(" failed to connect to '%s:%u' (rc=%d), retrying in 3 s\n", netMqttServer, netMqttPort, mqttClient.state());
@@ -308,14 +259,13 @@ void mqttCallback(char* topic, byte* payload, unsigned int length) {
     // ON  → activate master; scan takes control if enabled, otherwise relay on.
     if (strcmp(msg, "OFF") == 0) {
       masterOn   = false;
-      arpPending = false;
       saveConfig();
       setRelay(false);
     } else if (strcmp(msg, "ON") == 0) {
       masterOn = true;
       saveConfig();
-      if (scanEnabled && targetMacSet) {
-        lastScanTime = 0;    // trigger an immediate ARP scan cycle
+      if (scanEnabled && targetIpSet) {
+        lastScanTime = 0;    // trigger an immediate ping scan cycle
       } else {
         setRelay(true);      // no scan configured – just turn on
       }
@@ -324,36 +274,30 @@ void mqttCallback(char* topic, byte* payload, unsigned int length) {
   else if (strcmp(topic, TOPIC_SCAN_CMD) == 0) {
     // scan/command only governs the scan feature, never touches masterOn.
     if      (strcmp(msg, "ON")  == 0) { scanEnabled = true;  lastScanTime = 0; }
-    else if (strcmp(msg, "OFF") == 0) { scanEnabled = false; arpPending = false; }
+    else if (strcmp(msg, "OFF") == 0) { scanEnabled = false; }
     mqttClient.publish(TOPIC_SCAN_STATE, scanEnabled ? "ON" : "OFF", true);
     saveConfig();
   }
-  else if (strcmp(topic, TOPIC_MAC_CMD) == 0) {
-    // Payload must be "AA:BB:CC:DD:EE:FF" (colons, upper or lower case hex).
-    if (parseMac(msg, targetMac)) {
-      targetMacSet = true;
-      publishMacState();
+  else if (strcmp(topic, TOPIC_IP_CMD) == 0) {
+    if (targetIp.fromString(msg)) {
+      targetIpSet = true;
+      publishIpState();
       saveConfig();
-      Serial.printf("[MAC] Target set to %s\n", msg);
+      Serial.printf("[IP] Target set to %s\n", msg);
     } else {
-      Serial.printf("[MAC] Invalid format: %s\n", msg);
+      Serial.printf("[IP] Invalid format: %s\n", msg);
     }
   }
 }
 
 // ── Scan lifecycle ────────────────────────────────────────────────────────────
-void startScan() {
-  sendArpRequests();
-  arpSentTime = millis();
-  arpPending  = true;
-}
-
-void finishScan() {
-  arpPending   = false;
+void performScan() {
   lastScanTime = millis();
-  if (!masterOn) return;        // master went off while scan was pending – do nothing
-  bool found = checkArpCache();
-  Serial.printf("[Scan] ARP cache check – target MAC %s\n", found ? "FOUND" : "not found");
+  if (!masterOn) return;        // master went off – do nothing
+
+  Serial.printf("[Scan] Pinging %s...\n", targetIp.toString().c_str());
+  bool found = Ping.ping(targetIp, 1);
+  Serial.printf("[Scan] Ping result: %s\n", found ? "SUCCESS" : "FAILED");
   setRelay(found);
 }
 
@@ -378,7 +322,7 @@ void setup() {
 
   // Re-apply master state after reconnecting.
   if (masterOn) {
-    if (scanEnabled && targetMacSet) lastScanTime = 0;  // scan will fire immediately
+    if (scanEnabled && targetIpSet) lastScanTime = 0;  // scan will fire immediately
     else                             setRelay(true);
   }
 }
@@ -397,14 +341,9 @@ void loop() {
 
   unsigned long now = millis();
 
-  // Phase 1 – send ARP requests when master is on and interval has elapsed.
-  if (masterOn && scanEnabled && targetMacSet && !arpPending &&
+  // Ping the target IP when master is on and interval has elapsed.
+  if (masterOn && scanEnabled && targetIpSet &&
       (now - lastScanTime >= SCAN_INTERVAL_MS)) {
-    startScan();
-  }
-
-  // Phase 2 – read the ARP cache after replies have had time to arrive.
-  if (arpPending && (now - arpSentTime >= ARP_REPLY_TIMEOUT_MS)) {
-    finishScan();
+    performScan();
   }
 }
